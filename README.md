@@ -1,5 +1,5 @@
 # Alternative-to-electromagnetic-switch-ULTRASOUND-TRIGGER-
-Alternative to electromagnetic signal-ULTRASOUND TRIGGER THAT ACTIVATE THE LIGHTS-ALARM OR WHATEVER YOU WANT
+Alternative to electromagnetic signal-ULTRASOUND TRIGGER THAT ACTIVATE THE LIGHTS-ALARM OR WHATEVER YOU WANT.
 Trying to activate a lights,alarm wireless with the basic arduino kit, i create a specific ultrasound signal with HC-SR04.
 This will be used to a school project as a part of smart city miniature and "priority" to ambulance of blocked roads with traffic lights
 First the code of transmitter:
