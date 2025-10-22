@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>HC-SR04 • Simple (Chrome)</title>
+<style>
+  :root{
+    --bg:#0b1020;--panel:#19233c;--ink:#eaeef7;--muted:#aab3c7;
+    --tx:#0ea5e9; --rx:#22c55e; --dist:#eab308; --axis:#1f2937;
+    --target:#475569; --chip:#1e293b; --chip-stroke:#e2e8f0;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,Segoe UI,Roboto,Arial}
+  .wrap{display:grid;grid-template-rows:auto 1fr auto;min-height:100vh}
+  header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid #11182b}
+  .title{font-weight:700;font-size:18px}
+  .sub{color:var(--muted);font-size:13px;margin-top:2px}
+  .right{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .creator{background:rgba(25,35,60,.9);padding:6px 10px;border-radius:10px;font-weight:600;font-size:13px;color:#f2f6ff}
+  .status{background:#11182b;border:1px solid #1b2742;border-radius:10px;padding:6px 10px;color:#dbe3f9}
+  .btn{background:#253254;border:1px solid #2f3e67;color:#f3f6ff;padding:8px 12px;border-radius:10px;cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  select,.slider{background:#11182b;border:1px solid #1b2742;color:#f3f6ff;border-radius:8px;padding:6px 8px;accent-color:#5ea8ff}
+  .scene{display:grid;grid-template-columns:1fr minmax(320px,440px);gap:16px;padding:12px 16px 18px}
+  .card{background:#0a0f21;border:1px solid #10172a;border-radius:16px;overflow:hidden;min-height:66vh}
+  canvas{display:block;width:100%;height:100%}
+  .panel{background:var(--panel);border:1px solid #1b2742;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:10px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .pill{background:#11182b;border:1px solid #1b2742;border-radius:10px;padding:6px 10px}
+  .formula{background:#111827;border:1px solid #223049;border-radius:12px;padding:12px}
+  .big{font-weight:800;font-size:28px}
+  .live{margin-top:8px;font-size:16px}
+  footer{padding:10px 16px;color:var(--muted);border-top:1px solid #10172a}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="title">HC-SR04 — Διαμήκες κύμα • Trigger/Echo • ToF</div>
+      <div id="subtitle" class="sub">T = 20.0 °C • v ≈ 343.0 m/s • d = 50.0 cm • ToF = — μs • Mode: Simulation</div>
+    </div>
+    <div class="right">
+      <span class="creator">Δημιουργός: Νεκτάριος Κουράκης</span>
+      <span id="status" class="status">Disconnected</span>
+      <button id="connectBtn" class="btn">🔌 Connect</button>
+      <button id="disconnectBtn" class="btn" disabled>❌ Disconnect</button>
+      <label>Baud:
+        <select id="baudSel"><option selected>9600</option><option>115200</option></select>
+      </label>
+      <label>Θερμοκρασία: <input id="temp" type="range" min="0" max="40" step="0.5" value="20" class="slider"> <span id="tempVal">20.0</span> °C</label>
+      <label>Simulation d: <input id="dist" type="range" min="3" max="400" step="1" value="50" class="slider"> <span id="distVal">50</span> cm</label>
+    </div>
+  </header>
+
+  <main class="scene">
+    <div class="card"><canvas id="scene"></canvas></div>
+    <aside class="panel">
+      <div class="row">
+        <span class="pill">f = 40 kHz</span>
+        <span id="vLine" class="pill">v(T) = 331.3 + 0.606·T → 343.0 m/s</span>
+        <span id="lambdaLine" class="pill">λ ≈ 0.86 cm</span>
+        <span id="tofLine" class="pill">ToF = — μs</span>
+      </div>
+      <div class="formula">
+        <div class="big">x = v · t / 2</div>
+        <div id="liveEq" class="live">t = — μs ⇒ x = v·t/2 = — cm/μs · — / 2 ≈ — cm</div>
+      </div>
+      <div id="dataLine" class="pill">DATA: distance = 50.00 cm</div>
+    </aside>
+  </main>
+
+  <footer>
+    Για σύνδεση σε Chrome: άνοιξέ το από <b>https://</b> ή <b>http://localhost</b>. Το Arduino να στέλνει <code>T:12345 us</code> ή <code>D:37.5 cm</code>.
+  </footer>
+</div>
+
+<script>
+(() => {
+  // ------- Physics -------
+  const FREQ = 40000;
+  let tempC = 20.0;
+  const v_ms = T => 331.3 + 0.606*T;
+  const v_cm_us_f = T => v_ms(T)*100/1e6; // cm/μs
+  let v_cm_us = v_cm_us_f(tempC);
+  let measuredCm = 50, targetHeightCm = 80;
+  let lastToF_us = NaN;
+
+  // stability
+  const hist=[]; const HIST=20; let isStable=false;
+  function pushH(v){ hist.push(v); if(hist.length>HIST) hist.shift();
+    if(hist.length<8){ isStable=false; return; }
+    let mn=Infinity,mx=-Infinity; for(const x of hist){ if(x<mn) mn=x; if(x>mx) mx=x; }
+    isStable = (mx-mn)<0.5;
+  }
+
+  // ------- UI refs -------
+  const subtitle=document.getElementById('subtitle');
+  const vLine=document.getElementById('vLine');
+  const lambdaLine=document.getElementById('lambdaLine');
+  const tofLine=document.getElementById('tofLine');
+  const liveEq=document.getElementById('liveEq');
+  const dataLine=document.getElementById('dataLine');
+  const tempS=document.getElementById('temp'); const tempVal=document.getElementById('tempVal');
+  const distS=document.getElementById('dist'); const distVal=document.getElementById('distVal');
+  const connectBtn=document.getElementById('connectBtn');
+  const disconnectBtn=document.getElementById('disconnectBtn');
+  const baudSel=document.getElementById('baudSel');
+  const statusEl=document.getElementById('status');
+
+  // ------- Serial (minimal) -------
+  let port=null, reader=null, inputDone=null, mode='Simulation';
+  const serialOK = 'serial' in navigator;
+
+  async function connect(){
+    if(!serialOK){ alert('Ο Chrome δεν υποστηρίζει Web Serial εδώ.'); return; }
+    try{
+      status('Connecting…');
+      port = await navigator.serial.requestPort(); // απλό
+      await port.open({ baudRate: parseInt(baudSel.value,10) });
+
+      // start reader
+      const dec = new TextDecoderStream();
+      inputDone = port.readable.pipeTo(dec.writable);
+      reader = dec.readable.getReader();
+      readLoop();
+      connectBtn.disabled = true; disconnectBtn.disabled = false;
+      status('Connected'); mode='Serial';
+    }catch(e){
+      // Αν είσαι σε file:// θα πάρεις SecurityError
+      status('Disconnected');
+      alert(e.message + '\n\nΆνοιξέ το από https ή http://localhost.');
+      await disconnect();
+    }
+  }
+  async function disconnect(){
+    try{ if(reader){ await reader.cancel(); reader.releaseLock(); }
+         if(inputDone){ await inputDone.catch(()=>{}); }
+         if(port){ await port.close(); } }catch{}
+    port=null; reader=null; inputDone=null;
+    connectBtn.disabled=false; disconnectBtn.disabled=true; mode='Simulation'; status('Disconnected');
+  }
+  function status(s){ statusEl.textContent=s; }
+
+  async function readLoop(){
+    let buf='';
+    try{
+      while(port && reader){
+        const {value,done} = await reader.read();
+        if(done) break;
+        if(!value) continue;
+        buf += value;
+        const lines = buf.split(/\r?\n/); buf = lines.pop();
+        for(const raw of lines) parseLine(raw.trim());
+      }
+    }catch{}
+    await disconnect();
+  }
+
+  function parseLine(line){
+    if(!line || /εκτός/i.test(line)) return;
+    const cl = line.replace(',', '.');
+    const mT = cl.match(/\bT\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\b/i);
+    const mD = cl.match(/\bD\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\b/i);
+    if(mT){
+      lastToF_us = parseFloat(mT[1]);
+      measuredCm = (v_cm_us * lastToF_us)/2;
+      pushH(measuredCm);
+      pingStart = performance.now();
+      return;
+    }
+    if(mD){
+      measuredCm = clamp(parseFloat(mD[1]),3,400);
+      lastToF_us = NaN;
+      pushH(measuredCm);
+      pingStart = performance.now();
+      return;
+    }
+    const n = cl.match(/[-+]?[0-9]*\.?[0-9]+/);
+    if(n){
+      const v = parseFloat(n[0]);
+      if(/us|μs/i.test(cl) || v>800){
+        lastToF_us = v; measuredCm = (v_cm_us * v)/2;
+      } else { measuredCm = clamp(v,3,400); lastToF_us = NaN; }
+      pushH(measuredCm); pingStart = performance.now();
+    }
+  }
+
+  connectBtn.onclick = connect;
+  disconnectBtn.onclick = disconnect;
+
+  // ------- Sliders -------
+  tempS.oninput = () => { tempC=parseFloat(tempS.value); tempVal.textContent=tempC.toFixed(1);
+    v_cm_us = v_cm_us_f(tempC);
+    if(!Number.isNaN(lastToF_us)){ measuredCm=(v_cm_us*lastToF_us)/2; pushH(measuredCm); }
+  };
+  distS.oninput = () => { measuredCm=clamp(parseFloat(distS.value),3,400);
+    distVal.textContent=measuredCm.toFixed(0); lastToF_us=NaN; pushH(measuredCm); pingStart=performance.now(); };
+
+  // ------- Canvas / scene -------
+  const canvas=document.getElementById('scene'), ctx=canvas.getContext('2d');
+  let pxPerCm=3, pingStart=performance.now();
+  function resize(){ const dpr=Math.max(1,window.devicePixelRatio||1);
+    const r=canvas.getBoundingClientRect(); canvas.width=r.width*dpr; canvas.height=r.height*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const marginL=90, marginR=40;
+  function draw(){
+    requestAnimationFrame(draw);
+    const w=canvas.clientWidth, h=canvas.clientHeight;
+    ctx.clearRect(0,0,w,h);
+
+    const usableW = w - marginL - marginR - 220;
+    pxPerCm = Math.max(1.2, Math.min(usableW/420.0, 3.8));
+
+    const originX = marginL + 70;
+    const centerY = Math.round(h*0.55);
+    const baselineY = centerY + 70;
+
+    // background
+    fillRect(0,0,w,h,'#0a0f21');
+
+    // sensor (vertical)
+    drawSensor(originX, centerY);
+
+    // baseline & height axis
+    strokeLine(marginL-20, baselineY, w - marginR, baselineY, 1, css('--axis'));
+    drawHeightAxis(originX, baselineY);
+
+    // target
+    const targetX = originX + measuredCm*pxPerCm;
+    const targetH = targetHeightCm*pxPerCm;
+    fillRect(targetX-8, baselineY-targetH, 16, Math.max(4,targetH), css('--target'));
+
+    // distance bar
+    strokeLine(originX+30, centerY-45, targetX, centerY-45, 2, css('--dist'));
+    tri(originX+30, centerY-45, +1, css('--dist'));
+    tri(targetX, centerY-45, -1, css('--dist'));
+    text(`Απόσταση: ${measuredCm.toFixed(1)} cm`, (originX+30+targetX)/2, centerY-50, '#fff', 13, 'center');
+
+    // longitudinal wave
+    const now = performance.now();
+    const elapsed_us = (now - pingStart)*1000.0;
+    const vms = v_ms(tempC), vcm_s = vms*100;
+    const lambda_cm = vcm_s / FREQ;
+    const travel = v_cm_us*elapsed_us, total = measuredCm*2;
+    const Lcm = (isStable?28:20)*lambda_cm, bandHalf=30;
+
+    let returning=false, x1=0, x2=0;
+    if(travel<=measuredCm){ x2=travel; x1=Math.max(0,x2-Lcm); }
+    else if(travel<=total){ returning=true; const tret=travel-measuredCm; const front=measuredCm-tret; x2=Math.max(0,front); x1=Math.max(0,x2-Lcm); }
+
+    const col = returning?css('--rx'):css('--tx');
+    drawBand(originX+30, centerY, x1, x2, lambda_cm, bandHalf, col, isStable?1.35:1.0);
+    const x1px=originX+30+x1*pxPerCm, x2px=originX+30+x2*pxPerCm;
+    glow(x1px,centerY,x2px,centerY,col,isStable?1.8:0.9);
+
+    // ticks
+    for(let cm=0; cm<=400; cm+=50){
+      const x = originX + cm*pxPerCm;
+      strokeLine(x, baselineY+8, x, baselineY+16, 1, css('--axis'));
+      text(cm+' cm', x, baselineY+20, css('--muted'), 12, 'center');
+    }
+
+    // panel text
+    document.getElementById('vLine').textContent = `v(T) = 331.3 + 0.606·T → ${vms.toFixed(1)} m/s`;
+    document.getElementById('lambdaLine').textContent = `λ ≈ ${(vcm_s/FREQ).toFixed(2)} cm`;
+    const t_us = (lastToF_us>0 ? lastToF_us : (2*measuredCm)/v_cm_us);
+    document.getElementById('tofLine').textContent = `ToF = ${Math.round(t_us)} μs`;
+    dataLine.textContent = `DATA: distance = ${measuredCm.toFixed(2)} cm`;
+    const x_from_t = (v_cm_us*t_us)/2;
+    liveEq.textContent = `t = ${Math.round(t_us)} μs  ⇒  x = v·t/2 = ${v_cm_us.toFixed(5)} cm/μs · ${Math.round(t_us)} / 2 ≈ ${x_from_t.toFixed(2)} cm`;
+    subtitle.textContent = `T = ${tempC.toFixed(1)} °C • v ≈ ${vms.toFixed(1)} m/s • d = ${measuredCm.toFixed(1)} cm • ToF = ${Math.round(t_us)} μs • Mode: ${mode}`;
+  }
+
+  // drawing helpers
+  function css(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+  function fillRect(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(x,y,w,h); }
+  function strokeLine(x1,y1,x2,y2,w,c){ ctx.beginPath(); ctx.lineWidth=w; ctx.strokeStyle=c; ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
+  function text(t,x,y,c,s=13,a='left'){ ctx.fillStyle=c; ctx.font=`${s}px system-ui,Segoe UI,Roboto,Arial`; ctx.textAlign=a; ctx.textBaseline='alphabetic'; ctx.fillText(t,x,y); }
+  function tri(x,y,dir,c){ ctx.fillStyle=c; ctx.beginPath(); if(dir>0){ctx.moveTo(x,y);ctx.lineTo(x+8,y-5);ctx.lineTo(x+8,y+5);} else {ctx.moveTo(x,y);ctx.lineTo(x-8,y-5);ctx.lineTo(x-8,y+5);} ctx.closePath(); ctx.fill(); }
+  function circle(x,y,r){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill(); }
+  function drawSensor(cx,cy){
+    fillRect(cx-42, cy-60, 84, 120, css('--chip'));
+    ctx.lineWidth=2; ctx.strokeStyle=css('--chip-stroke'); ctx.strokeRect(cx-42, cy-60, 84, 120);
+    ctx.fillStyle=css('--tx'); circle(cx, cy-28, 17);
+    ctx.fillStyle=css('--rx'); circle(cx, cy+28, 17);
+    text('TRIGGER (ΠΟΜΠΟΣ)', cx, cy-68, '#f4f7ff', 12, 'center');
+    text('ECHO (ΔΕΚΤΗΣ)',    cx, cy+78, '#f4f7ff', 12, 'center');
+  }
+  function drawBand(originX,cy,x1_cm,x2_cm,lambda_cm,halfH,col,boost){
+    if(x2_cm<=x1_cm) return;
+    const step=lambda_cm/10, L=x2_cm-x1_cm;
+    ctx.lineWidth=2;
+    for(let x=x1_cm;x<=x2_cm;x+=step){
+      const xx=originX+x*pxPerCm;
+      const phase=2*Math.PI*(x/lambda_cm);
+      const dens=0.5+0.5*Math.cos(phase);
+      const u=(x-x1_cm)/Math.max(1e-6,L);
+      const win=0.5*(1-Math.cos(2*Math.PI*Math.max(0,Math.min(1,u))));
+      const a=Math.max(10,Math.min(255,(40+200*dens)*win*boost));
+      ctx.strokeStyle=rgba(col,a/255);
+      ctx.beginPath(); ctx.moveTo(xx,cy-halfH); ctx.lineTo(xx,cy+halfH); ctx.stroke();
+    }
+  }
+  function glow(x1,y1,x2,y2,col,intensity){
+    const passes=Math.max(6,Math.min(24,Math.round(10*intensity)));
+    for(let i=passes;i>=1;i--){
+      const a=Math.max(10,Math.min(255,(20+(120*(i/passes)))*intensity));
+      ctx.strokeStyle=rgba(col,a/255); ctx.lineWidth=i*1.6;
+      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    }
+    ctx.strokeStyle=rgba(col,1); ctx.lineWidth=3.6;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  }
+  function rgba(hex,a){ const c=hex.replace('#',''); const r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16); return `rgba(${r},${g},${b},${a})`; }
+  function drawHeightAxis(originX, baseY){
+    const axisX = originX - 50;
+    strokeLine(axisX, baseY, axisX, baseY-220*pxPerCm, 1, css('--axis'));
+    text("Ύψος (cm)", axisX, baseY-220*pxPerCm-8, '#aab3c7', 12, 'center');
+    for(let cm=0; cm<=200; cm+=20){
+      const y = baseY - cm*pxPerCm;
+      strokeLine(axisX-6,y,axisX+6,y,1,css('--axis'));
+      text(cm, axisX-10, y+4, '#aab3c7', 12, 'right');
+    }
+  }
+  function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+
+  // kick
+  pushH(measuredCm);
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
